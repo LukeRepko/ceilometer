@@ -256,6 +256,8 @@ class NotificationEventsConverter(object):
     def to_event(self, priority, notification_body):
         event_type = notification_body['event_type']
         message_id = notification_body['metadata']['message_id']
+        if 'volume.attach' in event_type:
+            LOG.debug("RAW NOTIFICATION BODY: %s", notification_body)
         edef = None
         for d in self.definitions:
             if d.match_type(event_type):
