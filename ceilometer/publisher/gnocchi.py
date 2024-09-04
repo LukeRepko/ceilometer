@@ -543,7 +543,9 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
                 self._update_event(rd, event)
 
     def _update_event(self, rd, event):
+        LOG.debug("RAW UPDATE EVENT CONTENTS: %s", event)
         resource = rd.event_attributes(event)
+        LOG.debug("RAW UPDATE EVENT ATTRS: %s", resource)
         associated_resources = rd.cfg.get('event_associated_resources', {})
 
         if associated_resources:
