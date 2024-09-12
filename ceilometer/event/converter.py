@@ -257,7 +257,11 @@ class NotificationEventsConverter(object):
         event_type = notification_body['event_type']
         message_id = notification_body['metadata']['message_id']
         if 'volume.attach' in event_type:
-            LOG.debug("RAW NOTIFICATION BODY: %s", notification_body)
+            LOG.debug("RAW volume.attach NOTIFICATION BODY: %s",
+                      notification_body)
+        if 'compute.instance.exists' in event_type:
+            LOG.debug("RAW compute.instance.exists NOTIFICATION BODY: %s",
+                      notification_body)
         edef = None
         for d in self.definitions:
             if d.match_type(event_type):
