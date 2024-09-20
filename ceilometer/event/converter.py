@@ -256,11 +256,13 @@ class NotificationEventsConverter(object):
     def to_event(self, priority, notification_body):
         event_type = notification_body['event_type']
         message_id = notification_body['metadata']['message_id']
-        if 'volume.attach' in event_type:
-            LOG.debug("RAW volume.attach NOTIFICATION BODY: %s",
-                      notification_body)
-        if 'compute.instance.exists' in event_type:
-            LOG.debug("RAW compute.instance.exists NOTIFICATION BODY: %s",
+        log_events = [
+            'volume.attach', 'compute.instance.exists',
+            'compute.instance.update', 'compute.instance.resize_confirm.end',
+            'compute.instance.resize_revert.end'
+        ]
+        if event_type in log_events:
+            LOG.debug("RAWEVNT %s NOTIFICATION BODY: %s", event_type,
                       notification_body)
         edef = None
         for d in self.definitions:
