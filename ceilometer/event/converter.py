@@ -260,7 +260,8 @@ class NotificationEventsConverter(object):
             'volume.attach', 'compute.instance.exists',
             'compute.instance.update', 'compute.instance.resize_confirm.end',
             'compute.instance.resize_revert.end',
-            'compute.instance.create.end', 'compute.instance.delete.start'
+            'compute.instance.create.end', 'compute.instance.delete.start',
+            'compute.instance.delete.end'
         ]
         if event_type in log_events:
             LOG.debug("RAWEVNT %s NOTIFICATION BODY: %s", event_type,
