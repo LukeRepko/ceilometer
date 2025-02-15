@@ -257,13 +257,13 @@ class NotificationEventsConverter(object):
         event_type = notification_body['event_type']
         message_id = notification_body['metadata']['message_id']
         log_events = [
-            'volume.attach', 'compute.instance.exists',
+            'volume.attach', 'compute.instance.exists', 'volume.'
             'compute.instance.update', 'compute.instance.resize_confirm.end',
             'compute.instance.resize_revert.end',
             'compute.instance.create.end', 'compute.instance.delete.start',
             'compute.instance.delete.end'
         ]
-        if event_type in log_events:
+        if any(event_type.startswith(log_event) for log_event in log_events):
             LOG.debug("RAWEVNT %s NOTIFICATION BODY: %s", event_type,
                       notification_body)
         edef = None
