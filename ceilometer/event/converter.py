@@ -256,16 +256,16 @@ class NotificationEventsConverter(object):
     def to_event(self, priority, notification_body):
         event_type = notification_body['event_type']
         message_id = notification_body['metadata']['message_id']
-        log_events = [
-            'volume.attach', 'compute.instance.exists', 'volume.'
-            'compute.instance.update', 'compute.instance.resize_confirm.end',
-            'compute.instance.resize_revert.end',
-            'compute.instance.create.end', 'compute.instance.delete.start',
-            'compute.instance.delete.end'
-        ]
-        if any(event_type.startswith(log_event) for log_event in log_events):
-            LOG.debug("RAWEVNT %s NOTIFICATION BODY: %s", event_type,
-                      notification_body)
+        # log_events = [
+        #     'volume.attach', 'compute.instance.exists', 'volume.'
+        #     'compute.instance.update', 'compute.instance.resize_confirm.end',
+        #     'compute.instance.resize_revert.end',
+        #     'compute.instance.create.end', 'compute.instance.delete.start',
+        #     'compute.instance.delete.end'
+        # ]
+        # if any(event_type.startswith(log_event) for log_event in log_events):
+        LOG.debug("RAW_EVENT %s NOTIFICATION_BODY: %s", event_type,
+                  notification_body)
         edef = None
         for d in self.definitions:
             if d.match_type(event_type):
