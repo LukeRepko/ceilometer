@@ -1,0 +1,21 @@
+---
+fixes:
+    - >
+      Avoid Gnocchi resurrecting deleted resources. Gnocchi clears a
+      resource's ``ended_at`` whenever it receives a measure with a
+      timestamp greater than or equal to the current ``ended_at``
+      value, which happens in practice when periodic audit jobs
+      replay notifications for already-deleted resources (notably
+      Cinder's ``volume_usage_audit`` run with ``send_actions=True``,
+      which re-emits ``volume.create.end`` for volumes deleted within
+      the audit window) or when pollsters keep emitting samples for a
+      resource whose deletion has already been recorded. The Gnocchi
+      publisher now caches the ``ended_at`` it writes whenever it
+      processes a delete event and, on cache miss for samples that
+      advertise a delete-flavoured ``status`` in their metadata,
+      falls back to a single authoritative ``resource.get`` against
+      Gnocchi whose result is then cached. In ``publish_samples`` it
+      clamps any measure timestamp that would otherwise resurrect the
+      resource to the whole-second floor of ``ended_at``. This
+      preserves the final measurement at the moment of deletion
+      while keeping the resource marked as ended.

@@ -437,6 +437,207 @@ class PublisherTest(base.BaseTestCase):
             "Update event received on unexisting resource (%s), ignore it.",
             self.resource_id)
 
+    def test_stable_resource_attributes_hash(self):
+        url = netutils.urlsplit("gnocchi://")
+        publisher = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        attributes = {'hello': 'world', 'foo': 'bar'}
+        hash = publisher._hash_resource(attributes)
+        self.assertEqual(hash, publisher._hash_resource(attributes))
+
+    # Tests for skipping measures for deleted resources to avoid
+    # Gnocchi resurrecting them when audit jobs (e.g. Cinder's
+    # ``volume_usage_audit``) replay notifications.
+
+    def _make_volume_sample(self, timestamp, status=None):
+        metadata = {'display_name': 'vol'}
+        if status is not None:
+            metadata['status'] = status
+        return sample.Sample(
+            name='volume.size',
+            unit='GB',
+            type=sample.TYPE_GAUGE,
+            volume=10,
+            user_id='test_user',
+            project_id='test_project',
+            source='openstack',
+            timestamp=timestamp,
+            resource_id=self.resource_id,
+            resource_metadata=metadata)
+
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '._if_not_cached', mock.Mock())
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '.batch_measures')
+    def test_publish_samples_skips_samples_for_deleted_resource(
+            self, fake_batch):
+        # Warmed cache -> any subsequent sample for the resource is
+        # dropped, whether or not it advertises a status.
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._already_checked_archive_policies = True
+        d.cache.set(d._ENDED_AT_CACHE_PREFIX + self.resource_id,
+                    '2026-05-07T20:30:15.123456')
+
+        replayed = self._make_volume_sample(
+            '2026-05-07T20:35:16.000000', status='deleted')
+        d.publish_samples([replayed])
+
+        # batch_measures is called with an empty payload.
+        self.assertEqual(1, len(fake_batch.mock_calls))
+        measures = fake_batch.mock_calls[0][1][0]
+        self.assertEqual({}, measures)
+
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '._if_not_cached', mock.Mock())
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '.batch_measures')
+    def test_publish_samples_publishes_for_live_resource(self, fake_batch):
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._already_checked_archive_policies = True
+        # No cache entry -> treated as alive.
+
+        ts = '2026-05-07T20:35:16.000000'
+        d.publish_samples([self._make_volume_sample(ts)])
+
+        measures = fake_batch.mock_calls[0][1][0]
+        posted = measures[self.resource_id]['volume.size']['measures']
+        self.assertEqual(ts, posted[0]['timestamp'])
+
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '._if_not_cached', mock.Mock())
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '.batch_measures')
+    def test_publish_samples_falls_back_to_gnocchi_on_cache_miss(
+            self, fake_batch):
+        # Cache is cold but the sample signals deletion -> query Gnocchi
+        # once, learn the resource is ended, skip the sample, and cache
+        # the result so follow-up batches short-circuit.
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._already_checked_archive_policies = True
+        d._gnocchi.resource.get.return_value = {
+            'id': self.resource_id,
+            'ended_at': '2026-05-07T20:30:15.123456'}
+
+        d.publish_samples([self._make_volume_sample(
+            '2026-05-07T20:35:16.000000', status='deleted')])
+
+        self.assertEqual(1, d._gnocchi.resource.get.call_count)
+        measures = fake_batch.mock_calls[0][1][0]
+        self.assertEqual({}, measures)
+        self.assertEqual(
+            '2026-05-07T20:30:15.123456',
+            d.cache.get(d._ENDED_AT_CACHE_PREFIX + self.resource_id))
+
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '._if_not_cached', mock.Mock())
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '.batch_measures')
+    def test_publish_samples_fallback_caches_alive_sentinel(
+            self, fake_batch):
+        # Gnocchi says the resource is alive -> cache the sentinel so
+        # subsequent batches skip the lookup, and publish the sample.
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._already_checked_archive_policies = True
+        d._gnocchi.resource.get.return_value = {
+            'id': self.resource_id, 'ended_at': None}
+
+        ts = '2026-05-07T20:35:16.000000'
+        d.publish_samples([self._make_volume_sample(ts, status='deleted')])
+
+        self.assertEqual(
+            d._ENDED_AT_SENTINEL_ALIVE,
+            d.cache.get(d._ENDED_AT_CACHE_PREFIX + self.resource_id))
+        measures = fake_batch.mock_calls[0][1][0]
+        posted = measures[self.resource_id]['volume.size']['measures']
+        self.assertEqual(ts, posted[0]['timestamp'])
+
+        d._gnocchi.resource.get.reset_mock()
+        d.publish_samples([self._make_volume_sample(ts, status='deleted')])
+        self.assertEqual(0, d._gnocchi.resource.get.call_count)
+
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '._if_not_cached', mock.Mock())
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '.batch_measures')
+    def test_publish_samples_fallback_fails_open(self, fake_batch):
+        # Gnocchi lookup errors must not block publishing: the sample
+        # goes through with its original timestamp.
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._already_checked_archive_policies = True
+        d._gnocchi.resource.get.side_effect = Exception('gnocchi down')
+
+        ts = '2026-05-07T20:35:16.000000'
+        d.publish_samples([self._make_volume_sample(ts, status='deleted')])
+
+        measures = fake_batch.mock_calls[0][1][0]
+        posted = measures[self.resource_id]['volume.size']['measures']
+        self.assertEqual(ts, posted[0]['timestamp'])
+        self.assertIsNone(
+            d.cache.get(d._ENDED_AT_CACHE_PREFIX + self.resource_id))
+
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '._if_not_cached', mock.Mock())
+    @mock.patch('ceilometer.publisher.gnocchi.GnocchiPublisher'
+                '.batch_measures')
+    def test_publish_samples_fallback_not_triggered_when_status_live(
+            self, fake_batch):
+        # No ``status=delet*`` -> no Gnocchi round-trip, no skip.
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._already_checked_archive_policies = True
+
+        d.publish_samples([self._make_volume_sample(
+            '2026-05-07T20:35:16.000000', status='available')])
+
+        self.assertEqual(0, d._gnocchi.resource.get.call_count)
+
+    def test_set_ended_at_populates_cache(self):
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        ended_at = '2026-05-07T20:30:15.123456'
+        d._set_ended_at(
+            {'type': 'volume', 'id': self.resource_id}, ended_at)
+        self.assertEqual(
+            ended_at,
+            d.cache.get(d._ENDED_AT_CACHE_PREFIX + self.resource_id))
+
+    def test_set_ended_at_does_not_cache_on_failure(self):
+        url = netutils.urlsplit("gnocchi://")
+        d = gnocchi.GnocchiPublisher(self.conf.conf, url)
+        d._gnocchi.resource.update.side_effect = Exception('boom')
+        d._set_ended_at(
+            {'type': 'volume', 'id': self.resource_id},
+            '2026-05-07T20:30:15.123456')
+        self.assertIsNone(
+            d.cache.get(d._ENDED_AT_CACHE_PREFIX + self.resource_id))
+
+    def test_sample_indicates_deleted_status_variants(self):
+        def s(status):
+            return sample.Sample(
+                name='volume.size', unit='GB', type=sample.TYPE_GAUGE,
+                volume=0, user_id='u', project_id='p', source='openstack',
+                timestamp='2026-05-07T20:00:00',
+                resource_id=self.resource_id,
+                resource_metadata={'status': status} if status is not None
+                else {})
+
+        for status in ('deleted', 'DELETED', 'Deleted',
+                       'deleting', 'error_deleting',
+                       'deleted_pending_cleanup'):
+            self.assertTrue(
+                gnocchi.GnocchiPublisher._sample_indicates_deleted(
+                    s(status)))
+
+        for status in ('available', 'in-use', 'active', 'creating',
+                       '', None, 42):
+            self.assertFalse(
+                gnocchi.GnocchiPublisher._sample_indicates_deleted(
+                    s(status)))
+
 
 class MockResponse(mock.NonCallableMock):
     def __init__(self, code):

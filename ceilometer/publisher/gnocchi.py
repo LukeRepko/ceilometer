@@ -347,6 +347,85 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
                           sample)
         return filtered_samples
 
+    # Skip-on-ended state for deleted resources.
+    #
+    # Gnocchi clears a resource's ``ended_at`` whenever it ingests a
+    # measure that matches certain timestamp/bucket conditions, which
+    # resurrects deleted resources when audit jobs (e.g. Cinder's
+    # ``volume_usage_audit``) replay notifications. Rather than publish
+    # measures that might resurrect a resource, we skip them: the
+    # authoritative "final measurement at deletion" has already been
+    # captured by the matching delete-event notification, so late
+    # samples are redundant.
+    _ENDED_AT_CACHE_PREFIX = 'gnocchi_publisher:ended_at:'
+    _ENDED_AT_SENTINEL_ALIVE = ''
+
+    def _get_cached_ended_state(self, resource_id):
+        """Return cached state for ``resource_id``.
+
+        ``True`` means Gnocchi has an ``ended_at`` on this resource,
+        ``False`` means it has been confirmed alive, and ``None`` means
+        no cached state (caller may consult Gnocchi as a fallback).
+        """
+        if not self.cache or not resource_id:
+            return None
+        cached = self.cache.get(self._ENDED_AT_CACHE_PREFIX + resource_id)
+        if cached is None or not isinstance(cached, str):
+            return None
+        return cached != self._ENDED_AT_SENTINEL_ALIVE
+
+    @staticmethod
+    def _sample_indicates_deleted(sample):
+        """Return True when a sample advertises a deleted resource.
+
+        Triggers the authoritative Gnocchi fallback. Any ``status`` whose
+        lowercase form contains ``delet`` is treated as a signal; this
+        catches ``deleted``, ``deleting``, ``error_deleting`` and the
+        like across Cinder, Nova, Glance, Manila, etc. Samples without a
+        ``status`` (some notification paths filter it out) simply don't
+        trigger the fallback; those flows are covered by the cache
+        warmed in :meth:`_set_ended_at`.
+        """
+        metadata = sample.resource_metadata or {}
+        status = metadata.get('status')
+        return isinstance(status, str) and 'delet' in status.lower()
+
+    def _lookup_ended_state_from_gnocchi(self, resource_type, resource_id):
+        """Ask Gnocchi whether a resource is ended, and cache the answer.
+
+        Called at most once per resource per batch, only when the cache
+        is cold and a sample signals deletion. Returns ``True`` when the
+        resource has ``ended_at`` set, ``False`` when it is alive or
+        unknown to Gnocchi, and ``None`` on failure (fail-open: caller
+        will publish the sample).
+        """
+        try:
+            resource = self._gnocchi.resource.get(resource_type, resource_id)
+        except gnocchi_exc.ResourceNotFound:
+            # Will be created by the upcoming batch call; treat as alive.
+            if self.cache:
+                self.cache.set(
+                    self._ENDED_AT_CACHE_PREFIX + resource_id,
+                    self._ENDED_AT_SENTINEL_ALIVE)
+            return False
+        except Exception:
+            LOG.debug(
+                "Gnocchi ended_at lookup failed for [%s]/[%s]; "
+                "publishing samples unchanged.",
+                resource_type, resource_id, exc_info=True)
+            return None
+
+        # ``resource`` is a plain dict from gnocchiclient in production,
+        # but unit tests may return a bare Mock(). Require a real string
+        # before treating the value as a valid ended_at.
+        raw = resource.get('ended_at') if isinstance(resource, dict) else None
+        cache_value = raw if isinstance(raw, str) and raw else (
+            self._ENDED_AT_SENTINEL_ALIVE)
+        if self.cache:
+            self.cache.set(
+                self._ENDED_AT_CACHE_PREFIX + resource_id, cache_value)
+        return cache_value != self._ENDED_AT_SENTINEL_ALIVE
+
     def publish_samples(self, data):
         self.ensures_archives_policies()
 
@@ -369,10 +448,37 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         gnocchi_data = {}
         measures = {}
         for resource_id, samples_of_resource in resource_grouped_samples:
+            # Resolve deletion state at most once per batch. Materialize
+            # the group so we can both probe it for a deletion signal and
+            # iterate a second time to publish.
+            samples_of_resource = list(samples_of_resource)
+            resource_ended = self._get_cached_ended_state(resource_id)
+            if resource_ended is None and resource_id and any(
+                    self._sample_indicates_deleted(s)
+                    for s in samples_of_resource):
+                resource_type_hint = next(
+                    (self.metric_map[s.name].cfg['resource_type']
+                     for s in samples_of_resource
+                     if s.name in self.metric_map),
+                    None)
+                if resource_type_hint is not None:
+                    resource_ended = self._lookup_ended_state_from_gnocchi(
+                        resource_type_hint, resource_id)
+
             for sample in samples_of_resource:
                 metric_name = sample.name
                 LOG.debug("Processing sample [%s] for resource ID [%s].",
                           sample, resource_id)
+
+                if resource_ended:
+                    # Publishing would risk resurrecting the resource in
+                    # Gnocchi. The final measurement at deletion is
+                    # already captured by the delete-event notification.
+                    LOG.debug(
+                        "Skipping sample [%s] for deleted resource [%s].",
+                        sample, resource_id)
+                    continue
+
                 rd = self.metric_map.get(metric_name)
                 if rd is None:
                     if metric_name not in self._already_logged_metric_names:
@@ -383,6 +489,7 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
 
                 # NOTE(sileht): / is forbidden by Gnocchi
                 resource_id = resource_id.replace('/', '_')
+
                 if resource_id not in gnocchi_data:
                     gnocchi_data[resource_id] = {
                         'resource_type': rd.cfg['resource_type'],
@@ -623,4 +730,11 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         except Exception:
             LOG.error("Fail to update the resource %s", resource,
                       exc_info=True)
-        LOG.debug('Resource %s ended at %s' % (resource["id"], ended_at))
+        else:
+            # Warm the ended_at cache so subsequent publish_samples
+            # calls skip measures for this resource without a round-trip.
+            if self.cache:
+                self.cache.set(
+                    self._ENDED_AT_CACHE_PREFIX + resource['id'], ended_at)
+        LOG.debug('Resource %(resource_id)s ended at %(ended_at)s',
+                  {'resource_id': resource["id"], 'ended_at': ended_at})
