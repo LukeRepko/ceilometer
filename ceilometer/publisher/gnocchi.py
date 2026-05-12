@@ -209,6 +209,12 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         # we want to avoid the cache pathways entirely if the
         # cache has not been configured explicitly.
         self.cache = cache_utils.get_client(conf)
+        LOG.debug(
+            "[ended_at] publisher instance [%x] initialized with cache "
+            "client [%s] (id=[%x]).",
+            id(self),
+            type(self.cache).__name__ if self.cache else None,
+            id(self.cache) if self.cache else 0)
 
         self._gnocchi_project_id = None
         self._gnocchi_project_id_lock = threading.Lock()
@@ -367,12 +373,36 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         ``False`` means it has been confirmed alive, and ``None`` means
         no cached state (caller may consult Gnocchi as a fallback).
         """
-        if not self.cache or not resource_id:
+        if not self.cache:
+            LOG.debug(
+                "[ended_at] pub=[%x] cache disabled, skipping lookup "
+                "for [%s].", id(self), resource_id)
             return None
-        cached = self.cache.get(self._ENDED_AT_CACHE_PREFIX + resource_id)
-        if cached is None or not isinstance(cached, str):
+        if not resource_id:
             return None
-        return cached != self._ENDED_AT_SENTINEL_ALIVE
+        key = self._ENDED_AT_CACHE_PREFIX + resource_id
+        cached = self.cache.get(key)
+        if cached is None:
+            LOG.debug(
+                "[ended_at] pub=[%x] cache=[%x] MISS for [%s] (key=[%s]).",
+                id(self), id(self.cache), resource_id, key)
+            return None
+        if not isinstance(cached, str):
+            LOG.debug(
+                "[ended_at] pub=[%x] cache=[%x] entry for [%s] has "
+                "unexpected type [%s]; treating as miss.",
+                id(self), id(self.cache), resource_id,
+                type(cached).__name__)
+            return None
+        if cached == self._ENDED_AT_SENTINEL_ALIVE:
+            LOG.debug(
+                "[ended_at] pub=[%x] cache=[%x] HIT for [%s]: alive.",
+                id(self), id(self.cache), resource_id)
+            return False
+        LOG.debug(
+            "[ended_at] pub=[%x] cache=[%x] HIT for [%s]: ended_at=[%s].",
+            id(self), id(self.cache), resource_id, cached)
+        return True
 
     @staticmethod
     def _sample_indicates_deleted(sample):
@@ -399,6 +429,9 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         unknown to Gnocchi, and ``None`` on failure (fail-open: caller
         will publish the sample).
         """
+        LOG.debug(
+            "[ended_at] pub=[%x] querying Gnocchi for [%s]/[%s].",
+            id(self), resource_type, resource_id)
         try:
             resource = self._gnocchi.resource.get(resource_type, resource_id)
         except gnocchi_exc.ResourceNotFound:
@@ -407,12 +440,15 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
                 self.cache.set(
                     self._ENDED_AT_CACHE_PREFIX + resource_id,
                     self._ENDED_AT_SENTINEL_ALIVE)
+            LOG.debug(
+                "[ended_at] pub=[%x] Gnocchi says [%s] does not exist; "
+                "cached as alive.", id(self), resource_id)
             return False
         except Exception:
             LOG.debug(
-                "Gnocchi ended_at lookup failed for [%s]/[%s]; "
+                "[ended_at] pub=[%x] Gnocchi lookup failed for [%s]/[%s]; "
                 "publishing samples unchanged.",
-                resource_type, resource_id, exc_info=True)
+                id(self), resource_type, resource_id, exc_info=True)
             return None
 
         # ``resource`` is a plain dict from gnocchiclient in production,
@@ -424,7 +460,17 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         if self.cache:
             self.cache.set(
                 self._ENDED_AT_CACHE_PREFIX + resource_id, cache_value)
-        return cache_value != self._ENDED_AT_SENTINEL_ALIVE
+        if cache_value == self._ENDED_AT_SENTINEL_ALIVE:
+            LOG.debug(
+                "[ended_at] pub=[%x] Gnocchi says [%s] is alive "
+                "(ended_at=[%r]); cached as alive.",
+                id(self), resource_id, raw)
+            return False
+        LOG.debug(
+            "[ended_at] pub=[%x] Gnocchi says [%s] is ended "
+            "(ended_at=[%s]); cached.",
+            id(self), resource_id, cache_value)
+        return True
 
     def publish_samples(self, data):
         self.ensures_archives_policies()
@@ -462,8 +508,23 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
                      if s.name in self.metric_map),
                     None)
                 if resource_type_hint is not None:
+                    LOG.debug(
+                        "[ended_at] pub=[%x] cache miss for [%s] and a "
+                        "sample signals deletion; consulting Gnocchi.",
+                        id(self), resource_id)
                     resource_ended = self._lookup_ended_state_from_gnocchi(
                         resource_type_hint, resource_id)
+                else:
+                    LOG.debug(
+                        "[ended_at] pub=[%x] cache miss for [%s] and a "
+                        "sample signals deletion, but no known resource "
+                        "type; publishing unchanged.",
+                        id(self), resource_id)
+            elif resource_ended is None and resource_id:
+                LOG.debug(
+                    "[ended_at] pub=[%x] cache miss for [%s] and no sample "
+                    "signals deletion; publishing unchanged.",
+                    id(self), resource_id)
 
             for sample in samples_of_resource:
                 metric_name = sample.name
@@ -644,6 +705,11 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
                 continue
 
             rd, operation = rd
+            LOG.debug(
+                "[ended_at] pub=[%x] publish_events dispatch: "
+                "event_type=[%s] resource_type=[%s] operation=[%s].",
+                id(self), event.event_type,
+                rd.cfg.get('resource_type'), operation)
             if operation == EVENT_DELETE:
                 self._delete_event(rd, event)
             if operation == EVENT_CREATE:
@@ -652,7 +718,9 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
                 self._update_event(rd, event)
 
     def _update_event(self, rd, event):
+        LOG.debug("RAXDEBUG UPDATE EVENT CONTENTS: %s", event)
         resource = rd.event_attributes(event)
+        LOG.debug("RAXDEBUG UPDATE EVENT ATTRS: %s", resource)
         associated_resources = rd.cfg.get('event_associated_resources', {})
 
         if associated_resources:
@@ -670,6 +738,10 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
         ended_at = timeutils.utcnow().isoformat()
 
         resource = rd.event_attributes(event)
+        LOG.debug(
+            "[ended_at] pub=[%x] _delete_event for resource_id=[%s] "
+            "resource_type=[%s] ended_at=[%s].",
+            id(self), resource.get('id'), resource.get('type'), ended_at)
         associated_resources = rd.cfg.get('event_associated_resources', {})
 
         if associated_resources:
@@ -734,7 +806,18 @@ class GnocchiPublisher(publisher.ConfigPublisherBase):
             # Warm the ended_at cache so subsequent publish_samples
             # calls skip measures for this resource without a round-trip.
             if self.cache:
-                self.cache.set(
-                    self._ENDED_AT_CACHE_PREFIX + resource['id'], ended_at)
+                key = self._ENDED_AT_CACHE_PREFIX + resource['id']
+                self.cache.set(key, ended_at)
+                # Read back to verify the write actually took effect.
+                readback = self.cache.get(key)
+                LOG.debug(
+                    "[ended_at] pub=[%x] cache=[%x] WARMED for [%s] "
+                    "(key=[%s], wrote=[%s], readback=[%r]).",
+                    id(self), id(self.cache), resource['id'],
+                    key, ended_at, readback)
+            else:
+                LOG.debug(
+                    "[ended_at] pub=[%x] cache disabled; cannot warm "
+                    "for [%s].", id(self), resource['id'])
         LOG.debug('Resource %(resource_id)s ended at %(ended_at)s',
                   {'resource_id': resource["id"], 'ended_at': ended_at})

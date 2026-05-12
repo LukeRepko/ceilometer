@@ -256,6 +256,8 @@ class NotificationEventsConverter(object):
     def to_event(self, priority, notification_body):
         event_type = notification_body['event_type']
         message_id = notification_body['metadata']['message_id']
+        LOG.debug("RAXDEBUG EVENT:%s NOTIFICATION_BODY: %s", event_type,
+                  notification_body)
         edef = None
         for d in self.definitions:
             if d.match_type(event_type):

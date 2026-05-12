@@ -71,11 +71,23 @@ def get_client(conf):
     if conf.cache.enabled:
         region = get_cache_region(conf)
         if region:
+            LOG.debug(
+                "[ended_at] oslo_cache region configured "
+                "(backend=[%s], expiration_time=[%s]).",
+                getattr(conf.cache, 'backend', None),
+                getattr(conf.cache, 'expiration_time', None))
             return CacheClient(region, conf)
+        LOG.debug(
+            "[ended_at] oslo_cache is enabled but region configuration "
+            "failed; no cache client will be returned.")
     else:
         # configure oslo_cache.dict backend if
         # no caching backend is configured
         region = get_dict_cache_region()
+        LOG.debug(
+            "[ended_at] oslo_cache is disabled; falling back to "
+            "per-process dict backend (expiration_time=[%s]).",
+            CACHE_DURATION)
         return CacheClient(region, conf)
 
 
