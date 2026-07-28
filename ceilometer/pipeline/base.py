@@ -310,6 +310,14 @@ class NotificationEndpoint(object):
     event_types = []
     """List of strings to filter messages on."""
 
+    handled_priorities = ()
+    """Notification priorities this endpoint actually processes.
+
+    Any notification arriving at a priority not listed here is logged and
+    then dropped (its queue is still consumed). Subclasses override this to
+    declare the levels they handle.
+    """
+
     def __init__(self, conf, publisher):
         super(NotificationEndpoint, self).__init__()
         # NOTE(gordc): this is filter rule used by oslo.messaging to dispatch
@@ -327,17 +335,56 @@ class NotificationEndpoint(object):
         :param message: Message to process.
         """
 
-    @classmethod
-    def _consume_and_drop(cls, notifications):
-        """RPC endpoint for useless notification level"""
-        # NOTE(sileht): nothing special todo here, but because we listen
-        # for the generic notification exchange we have to consume all its
-        # queues
+    def _log_notification_bodies(self, priority, notifications):
+        """Emit every raw notification body received for troubleshooting.
 
-    audit = _consume_and_drop
-    critical = _consume_and_drop
-    debug = _consume_and_drop
-    error = _consume_and_drop
-    info = _consume_and_drop
-    sample = _consume_and_drop
-    warn = _consume_and_drop
+        This is the single choke point that guarantees each notification the
+        endpoint receives is logged exactly once, regardless of its priority
+        or whether the endpoint ultimately processes or drops it.
+        """
+        for notification in notifications:
+            try:
+                event_type = notification.get('event_type')
+                message_id = notification.get('metadata', {}).get(
+                    'message_id')
+            except AttributeError:
+                # Body is not a mapping; log whatever we received anyway.
+                event_type = None
+                message_id = None
+            LOG.debug(
+                "RAXSUPERDEBUG endpoint=[%s] priority=[%s] event_type=[%s] "
+                "message_id=[%s] notification_body=%s",
+                type(self).__name__, priority, event_type, message_id,
+                notification)
+
+    def _log_and_dispatch(self, priority, notifications):
+        """Log all received bodies, then process handled priorities.
+
+        Priorities not in ``handled_priorities`` are dropped after logging.
+        We must still consume them because we listen on the generic
+        notification exchange and have to drain all of its queues.
+        """
+        self._log_notification_bodies(priority, notifications)
+        if priority in self.handled_priorities:
+            return self.process_notifications(priority, notifications)
+
+    def audit(self, notifications):
+        return self._log_and_dispatch('audit', notifications)
+
+    def critical(self, notifications):
+        return self._log_and_dispatch('critical', notifications)
+
+    def debug(self, notifications):
+        return self._log_and_dispatch('debug', notifications)
+
+    def error(self, notifications):
+        return self._log_and_dispatch('error', notifications)
+
+    def info(self, notifications):
+        return self._log_and_dispatch('info', notifications)
+
+    def sample(self, notifications):
+        return self._log_and_dispatch('sample', notifications)
+
+    def warn(self, notifications):
+        return self._log_and_dispatch('warn', notifications)

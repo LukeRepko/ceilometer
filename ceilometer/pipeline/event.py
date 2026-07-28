@@ -26,6 +26,8 @@ class EventEndpoint(base.NotificationEndpoint):
 
     event_types = []
 
+    handled_priorities = ('info', 'error')
+
     def __init__(self, conf, publisher):
         super(EventEndpoint, self).__init__(conf, publisher)
         LOG.debug('Loading event definitions')
@@ -33,20 +35,6 @@ class EventEndpoint(base.NotificationEndpoint):
             conf,
             extension.ExtensionManager(
                 namespace='ceilometer.event.trait_plugin'))
-
-    def info(self, notifications):
-        """Convert message at info level to Ceilometer Event.
-
-        :param notifications: list of notifications
-        """
-        return self.process_notifications('info', notifications)
-
-    def error(self, notifications):
-        """Convert message at error level to Ceilometer Event.
-
-        :param notifications: list of notifications
-        """
-        return self.process_notifications('error', notifications)
 
     def process_notifications(self, priority, notifications):
         for message in notifications:

@@ -21,19 +21,7 @@ LOG = log.getLogger(__name__)
 
 class SampleEndpoint(base.NotificationEndpoint):
 
-    def info(self, notifications):
-        """Convert message at info level to Ceilometer sample.
-
-        :param notifications: list of notifications
-        """
-        return self.process_notifications('info', notifications)
-
-    def sample(self, notifications):
-        """Convert message at sample level to Ceilometer Event.
-
-        :param notifications: list of notifications
-        """
-        return self.process_notifications('sample', notifications)
+    handled_priorities = ('info', 'sample')
 
     def process_notifications(self, priority, notifications):
         for message in notifications:
