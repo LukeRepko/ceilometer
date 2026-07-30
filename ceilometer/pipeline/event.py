@@ -116,5 +116,6 @@ class EventPipelineManager(base.PipelineManager):
         super(EventPipelineManager, self).__init__(
             conf, conf.event_pipeline_cfg_file)
 
-    def get_main_endpoints(self):
-        return [EventEndpoint(self.conf, self.publisher())]
+    def get_main_endpoints(self, vhost=None):
+        return self._tag_endpoints_with_vhost(
+            [EventEndpoint(self.conf, self.publisher())], vhost)

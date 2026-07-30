@@ -299,9 +299,20 @@ class PipelineManager(agent.ConfigManagerBase):
         """Build publisher for pipeline publishing."""
         return PublishContext(self.pipelines)
 
-    def get_main_endpoints(self):
-        """Return endpoints for main queue."""
+    def get_main_endpoints(self, vhost=None):
+        """Return endpoints for main queue.
+
+        :param vhost: messaging virtual host the endpoints will serve, used
+                      only to give notification body debug logging context.
+        """
         pass
+
+    @staticmethod
+    def _tag_endpoints_with_vhost(endpoints, vhost):
+        """Record the serving vhost on each endpoint for debug logging."""
+        for endpoint in endpoints:
+            endpoint.vhost = vhost
+        return endpoints
 
 
 class NotificationEndpoint(object):
@@ -316,6 +327,14 @@ class NotificationEndpoint(object):
     Any notification arriving at a priority not listed here is logged and
     then dropped (its queue is still consumed). Subclasses override this to
     declare the levels they handle.
+    """
+
+    vhost = None
+    """Messaging virtual host this endpoint's listener is attached to.
+
+    Notification bodies carry no vhost, so it is recorded on the endpoint
+    when the listener is wired up. It is assigned after construction so
+    endpoint plugin constructor signatures stay untouched.
     """
 
     def __init__(self, conf, publisher):
@@ -335,6 +354,19 @@ class NotificationEndpoint(object):
         :param message: Message to process.
         """
 
+    def _should_log_bodies(self):
+        """Whether notification bodies for this endpoint should be logged.
+
+        An empty whitelist means log everything. Otherwise only endpoints
+        bound to a whitelisted vhost log their bodies. An endpoint with an
+        unknown vhost cannot be attributed, so it stays quiet whenever a
+        whitelist is in force.
+        """
+        whitelist = self.conf.notification.raxsuperdebug_vhosts
+        if not whitelist:
+            return True
+        return self.vhost in whitelist
+
     def _log_notification_bodies(self, priority, notifications):
         """Emit every raw notification body received for troubleshooting.
 
@@ -342,6 +374,8 @@ class NotificationEndpoint(object):
         endpoint receives is logged exactly once, regardless of its priority
         or whether the endpoint ultimately processes or drops it.
         """
+        if not self._should_log_bodies():
+            return
         for notification in notifications:
             try:
                 event_type = notification.get('event_type')
@@ -352,10 +386,10 @@ class NotificationEndpoint(object):
                 event_type = None
                 message_id = None
             LOG.debug(
-                "RAXSUPERDEBUG endpoint=[%s] priority=[%s] event_type=[%s] "
-                "message_id=[%s] notification_body=%s",
-                type(self).__name__, priority, event_type, message_id,
-                notification)
+                "RAXSUPERDEBUG vhost=[%s] endpoint=[%s] priority=[%s] "
+                "event_type=[%s] message_id=[%s] notification_body=%s",
+                self.vhost, type(self).__name__, priority, event_type,
+                message_id, notification)
 
     def _log_and_dispatch(self, priority, notifications):
         """Log all received bodies, then process handled priorities.

@@ -62,6 +62,17 @@ OPTS = [
                     default=['meter', 'event'],
                     help="Select which pipeline managers to enable to "
                     " generate data"),
+    cfg.ListOpt('raxsuperdebug_vhosts',
+                default=[],
+                help="Restrict RAXSUPERDEBUG notification body debug "
+                     "logging to notifications received from these "
+                     "messaging virtual hosts. Empty (the default) logs "
+                     "bodies from every vhost ceilometer listens to, which "
+                     "can be very verbose. Only takes effect when the log "
+                     "level is DEBUG. Vhosts are taken from the "
+                     "[notification]/messaging_urls entries (or "
+                     "DEFAULT/transport_url when unset), for example "
+                     "'nova,neutron,cinder'."),
 ]
 
 
@@ -111,6 +122,22 @@ class NotificationService(cotyledon.Service):
     def _log_missing_pipeline(names):
         LOG.error(_('Could not load the following pipelines: %s'), names)
 
+    def _get_vhost(self, url):
+        """Return the virtual host for a messaging URL.
+
+        ``url`` may be None, in which case DEFAULT/transport_url is used.
+        Returns None when the vhost cannot be determined; this is only used
+        for debug logging context so it must never break listener startup.
+        """
+        try:
+            return oslo_messaging.TransportURL.parse(
+                self.conf, url).virtual_host
+        except Exception:
+            LOG.debug("Could not determine virtual host for a messaging "
+                      "URL; notification body debug logging will report an "
+                      "unknown vhost.", exc_info=True)
+            return None
+
     def run(self):
         # Delay startup so workers are jittered
         time.sleep(self.startup_delay)
@@ -130,18 +157,25 @@ class NotificationService(cotyledon.Service):
         # to ensure the option has been registered by oslo_messaging.
         messaging.get_notifier(messaging.get_transport(self.conf), '')
 
-        endpoints = []
-        for pipe_mgr in self.managers:
-            LOG.debug("Loading manager endpoints for [%s].", pipe_mgr)
-            endpoint = pipe_mgr.get_main_endpoints()
-            LOG.debug("Loaded endpoints [%s] for manager [%s].",
-                      endpoint, pipe_mgr)
-            endpoints.extend(endpoint)
         targets = self.get_targets()
 
         urls = self.conf.notification.messaging_urls or [None]
         for url in urls:
             transport = messaging.get_transport(self.conf, url)
+            vhost = self._get_vhost(url)
+            # NOTE(lrepko): endpoints are built per messaging URL so each
+            # one knows which virtual host its listener serves. Notification
+            # bodies carry no vhost, so this is the only place the two can
+            # be associated. Pipelines and publishers are still shared, the
+            # endpoints themselves are the only thing duplicated.
+            endpoints = []
+            for pipe_mgr in self.managers:
+                LOG.debug("Loading manager endpoints for [%s] on vhost [%s].",
+                          pipe_mgr, vhost)
+                endpoint = pipe_mgr.get_main_endpoints(vhost)
+                LOG.debug("Loaded endpoints [%s] for manager [%s] on vhost "
+                          "[%s].", endpoint, pipe_mgr, vhost)
+                endpoints.extend(endpoint)
             # NOTE(gordc): ignore batching as we want pull
             # to maintain sequencing as much as possible.
             listener = messaging.get_batch_notification_listener(

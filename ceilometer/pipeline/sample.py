@@ -141,9 +141,10 @@ class SamplePipelineManager(base.PipelineManager):
         super(SamplePipelineManager, self).__init__(
             conf, conf.pipeline_cfg_file)
 
-    def get_main_endpoints(self):
+    def get_main_endpoints(self, vhost=None):
         exts = extension.ExtensionManager(
             namespace='ceilometer.sample.endpoint',
             invoke_on_load=True,
             invoke_args=(self.conf, self.publisher()))
-        return [ext.obj for ext in exts]
+        return self._tag_endpoints_with_vhost(
+            [ext.obj for ext in exts], vhost)
